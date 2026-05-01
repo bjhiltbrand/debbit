@@ -19,13 +19,18 @@ LOGGER = logging.getLogger('debbit')
 def web_automation(driver, merchant, amount):
     driver.get('https://www.amazon.com/gp/product/B086KKT3RX')
 
-    WebDriverWait(driver, 30).until(expected_conditions.element_to_be_clickable((By.ID, "gcui-asv-reload-buynow-button")))
+    WebDriverWait(driver, 90).until(expected_conditions.element_to_be_clickable((By.ID, "gcui-asv-reload-buynow-button")))
+    for i in range(300):
+        if driver.find_element_by_id("gcui-asv-reload-buynow-button").text == 'Buy Now':  # wait for 'Loading...' text to turn into 'Buy Now'
+            break
+        time.sleep(0.1)
+
     time.sleep(1 + random.random() * 2)  # slow down automation randomly to help avoid bot detection
     driver.find_element_by_id('gcui-asv-reload-form-custom-amount').send_keys(utils.cents_to_str(amount))
     time.sleep(1 + random.random() * 2)  # slow down automation randomly to help avoid bot detection
     driver.find_element_by_id("gcui-asv-reload-buynow-button").click()
 
-    WebDriverWait(driver, 30).until(utils.AnyExpectedCondition(
+    WebDriverWait(driver, 90).until(utils.AnyExpectedCondition(
         expected_conditions.element_to_be_clickable((By.ID, 'ap_email')),  # first time login
         expected_conditions.element_to_be_clickable((By.XPATH, "//*[contains(text(),'" + merchant.usr + "')]")),  # username found on login page
         # Already logged in
@@ -141,23 +146,40 @@ def web_automation(driver, merchant, amount):
         expected_conditions.element_to_be_clickable((By.XPATH, "//*[contains(text(),'a payment method')]"))  # Another version of the checkout page
     ))
 
-    if driver.find_elements_by_id('payChangeButtonId'):
+    if driver.find_elements_by_id('payChangeButtonId'):  # expand list of cards
         time.sleep(1 + random.random() * 2)
         driver.find_element_by_id('payChangeButtonId').click()
         WebDriverWait(driver, 10).until(expected_conditions.element_to_be_clickable((By.XPATH, "//span[contains(text(),'ending in " + merchant.card[-4:] + "')]")))
 
+    if driver.find_elements_by_id('payment-change-link'):  # expand list of cards if prior element did not exist
+        time.sleep(1 + random.random() * 2)
+        driver.find_element_by_id('payment-change-link').click()
+        WebDriverWait(driver, 10).until(expected_conditions.element_to_be_clickable((By.XPATH, "//span[contains(text(),'ending in " + merchant.card[-4:] + "')]")))
+
+    card_selected = False
     for element in driver.find_elements_by_xpath("//span[contains(text(),'ending in " + merchant.card[-4:] + "')]"):
         try:  # Amazon has redundant non-clickable elements. This will try each one until one works.
             time.sleep(1 + random.random() * 2)
             element.click()
+            card_selected = True
             break
         except WebDriverException:
             pass
 
+    if not card_selected:
+        raise Exception('Unable to find or unable to click on card that has last 4 digits matching config file card.')
+
     if driver.find_elements_by_id('orderSummaryPrimaryActionBtn'):
+        time.sleep(1 + random.random() * 2)
         driver.find_element_by_id('orderSummaryPrimaryActionBtn').click()  # Click "Use this payment method" button
-    else:  # Find Continue text, the grandparent element of the text is the clickable Continue button
-        driver.find_element_by_xpath("//span[contains(text(),'Continue')]").find_element_by_xpath('../..').click()
+    else:  # Find Continue button. There are also non clickable spans with 'Continue' in them so try all of them until one works.
+        for element in driver.find_elements_by_xpath("//span[contains(text(),'Continue')]"):
+            try:
+                time.sleep(1 + random.random() * 2)
+                element.find_element_by_xpath('../..').click()  # the grandparent element of the text is the clickable Continue button
+                break
+            except Exception:
+                pass
 
     WebDriverWait(driver, 10).until(utils.AnyExpectedCondition(
         expected_conditions.element_to_be_clickable((By.ID, 'submitOrderButtonId')),  # "Place your order" button showing, card ready to be used
@@ -187,14 +209,14 @@ def web_automation(driver, merchant, amount):
 
     time.sleep(1 + random.random() * 2)
 
-    expected_order_total = 'Order total:$' + utils.cents_to_str(amount)
-    if driver.find_element_by_id('subtotals-marketplace-spp-bottom').text != expected_order_total:
-        LOGGER.error('Unable to verify order total is correct, not purchasing. Expected "' + expected_order_total + '", but found "' + driver.find_element_by_id('subtotals-marketplace-spp-bottom').text + '".')
-        return Result.failed
+    if not is_order_total_correct(driver, amount):
+        return Result.unverified
 
     if driver.find_elements_by_id('submitOrderButtonId'):
+        time.sleep(1 + random.random() * 2)
         driver.find_element_by_id('submitOrderButtonId').click()  # Click "Place your order" button
     else:
+        time.sleep(1 + random.random() * 2)
         driver.find_element_by_id('placeYourOrder').click()  # Other checkout page click "Place your order" button
 
     try:
@@ -229,3 +251,25 @@ Anti-automation captcha detected. Please follow these steps, future runs shouldn
 ''')
     except TimeoutException:
         pass
+
+
+def is_order_total_correct(driver, amount):
+    elements_to_check = []
+
+    try:
+        elements_to_check.append(driver.find_element_by_id('subtotals-marketplace-spp-bottom').text)
+    except common.exceptions.NoSuchElementException:
+        pass
+
+    try:
+        elements_to_check.append(driver.find_element_by_class_name('grand-total-price').text)
+    except common.exceptions.NoSuchElementException:
+        pass
+
+    expected_order_total = '$' + utils.cents_to_str(amount)
+    for element in elements_to_check:
+        if expected_order_total in element:
+            return True
+
+    LOGGER.error('Unable to verify order total is correct, not purchasing. Could not find expected amount ' + expected_order_total + ' in ' + str(elements_to_check))
+    return False
